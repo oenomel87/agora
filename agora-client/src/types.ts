@@ -4,6 +4,12 @@ export type ModelType = "anthropic" | "gpt" | "gemini";
 // 메시지 역할 타입
 export type RoleType = "user" | "assistant";
 
+// 토론 단계
+export type DiscussionPhase = "opinion" | "free_talk";
+
+// 사용자 액션
+export type UserAction = "continue" | "intervene" | "exit";
+
 // 개별 메시지
 export interface Message {
     role: RoleType;

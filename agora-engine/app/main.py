@@ -11,7 +11,7 @@ from pydantic_ai.models.google import GoogleModelSettings
 
 from dotenv import load_dotenv
 
-from app.models.chat import ChatRequest, ChatResponse, Message, ModelType
+from app.models.chat import ChatRequest, ChatResponse, Message, ModelType, DiscussionPhase
 from app.models.thread import Thread, ThreadDetail, ThreadList, GenerateTitleRequest
 from app.database import create_pool, close_pool
 from app.repositories import thread_repository
@@ -74,32 +74,44 @@ def parse_mention(text: str, current_model: ModelType) -> ModelType | None:
 
 
 def combine_messages(request: ChatRequest) -> str:
+    """Phase에 따라 다른 시스템 프롬프트를 생성합니다."""
     model_name = request.model
     all_models = ["anthropic", "gpt", "gemini"]
     other_models = ", ".join([m for m in all_models if m != model_name])
 
     messages = ""
-
     for message in request.messages:
         if message.role == "user":
             messages += f"User: {message.content}\n"
         elif message.role == "assistant":
             messages += f"{message.model}: {message.content}\n"
 
-    return f"""
-    당신은 {model_name}입니다.
-    지금 {other_models}와 함께 대화하고 있습니다.
+    if request.phase == DiscussionPhase.OPINION:
+        # Phase 1: 의견 수집 - 다른 AI 언급 금지
+        instructions = f"""당신은 {model_name}입니다.
+지금 {other_models}와 함께 토론에 참여하고 있습니다.
 
-    다음을 기억하세요:
-    - 솔직하게 의견을 말하세요
-    - 동의하지 않으면 그렇게 말해도 됩니다
-    - 특정 AI를 지목하지 마세요 (예: @gpt, @gemini 금지)
-    - 모든 의견에 동의할 필요는 없습니다.
-    - 너무 길게 말하지 마세요 (3-4문단 이내).
+다음을 기억하세요:
+- 솔직하게 자신의 의견만 제시하세요
+- 다른 AI를 언급하거나 질문하지 마세요
+- 3-4문단 이내로 작성하세요"""
+    else:
+        # Phase 2: 자유 토론 - 멘션으로 지목 가능
+        instructions = f"""당신은 {model_name}입니다.
+지금 {other_models}와 함께 토론하고 있습니다.
 
-    <지금까지의 대화>
-    {messages}
-    """
+다음을 기억하세요:
+- 이전 발언에 대해 반응하세요 (동의, 반박, 보충)
+- 다른 AI를 참조할 때는 이름만 사용하세요 (예: "Anthropic이 말했듯이", "GPT의 의견처럼")
+- 질문할 때만 응답 끝에 @를 사용하세요 (예: "@gpt, 이에 대해 어떻게 생각하나요?")
+- 여러 AI를 동시에 지목하지 마세요
+- 3-4문단 이내로 작성하세요"""
+
+    return f"""{instructions}
+
+<지금까지의 대화>
+{messages}
+"""
 
 
 # ============ Health Check ============

@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, type FormEvent, type KeyboardEvent } from "react";
-import type { Message, ModelType, Thread } from "./types";
-import { sendToModelsSequentially, createThread, getThreads, getThread, deleteThread, generateThreadTitle } from "./api";
+import type { Message, ModelType, Thread, DiscussionPhase } from "./types";
+import { sendChatMessage, MODELS, createThread, getThreads, getThread, deleteThread, generateThreadTitle } from "./api";
 import "./Chat.css";
 
 // 채팅 메시지 타입
@@ -36,6 +36,10 @@ export default function Chat() {
     const [currentThreadId, setCurrentThreadId] = useState<string | null>(null);
     const [currentThreadTitle, setCurrentThreadTitle] = useState<string>("새 토론");
     const [isFirstTurn, setIsFirstTurn] = useState(true);
+    const [phase, setPhase] = useState<DiscussionPhase>("opinion");
+    const [waitingForAction, setWaitingForAction] = useState(false);
+    const [turnCount, setTurnCount] = useState<Record<ModelType, number>>({ anthropic: 0, gpt: 0, gemini: 0 });
+    const [spokenInPhase1, setSpokenInPhase1] = useState<ModelType[]>([]);
     const messagesEndRef = useRef<HTMLDivElement>(null);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
@@ -73,6 +77,10 @@ export default function Chat() {
         setCurrentThreadId(null);
         setCurrentThreadTitle("새 토론");
         setIsFirstTurn(true);
+        setPhase("opinion");
+        setWaitingForAction(false);
+        setTurnCount({ anthropic: 0, gpt: 0, gemini: 0 });
+        setSpokenInPhase1([]);
     };
 
     // 쓰레드 선택
@@ -110,7 +118,93 @@ export default function Chat() {
         }
     };
 
-    // 메시지 전송
+    // 다음 발언자 결정 (멘션 우선 → 발언 횟수 최소 → 랜덤)
+    const decideNextSpeaker = (
+        lastResponse: string | null,
+        currentTurnCount: Record<ModelType, number>,
+        currentPhase: DiscussionPhase,
+        spoken: ModelType[]
+    ): ModelType => {
+        // Phase 1: 아직 발언하지 않은 AI 중 랜덤 선택
+        if (currentPhase === "opinion") {
+            const notSpoken = MODELS.filter(m => !spoken.includes(m));
+            if (notSpoken.length > 0) {
+                return notSpoken[Math.floor(Math.random() * notSpoken.length)];
+            }
+        }
+
+        // Phase 2: 마지막 멘션 파싱 (질문은 보통 응답 끝에 위치)
+        if (lastResponse) {
+            const mentions = lastResponse.match(/@(anthropic|gpt|gemini)/gi);
+            if (mentions && mentions.length > 0) {
+                // 마지막 멘션만 사용
+                const lastMention = mentions[mentions.length - 1];
+                return lastMention.substring(1).toLowerCase() as ModelType;
+            }
+        }
+
+        // 발언 횟수가 가장 적은 AI 선택
+        const minCount = Math.min(...Object.values(currentTurnCount));
+        const candidates = MODELS.filter(m => currentTurnCount[m] === minCount);
+        return candidates[Math.floor(Math.random() * candidates.length)];
+    };
+
+    // 단일 AI 호출
+    const callAI = async (
+        model: ModelType,
+        apiMessages: Message[],
+        threadId: string,
+        currentPhase: DiscussionPhase
+    ) => {
+        // 로딩 메시지 추가
+        setMessages(prev => [...prev, {
+            id: `loading-${model}`,
+            type: "ai",
+            content: "",
+            model,
+            isLoading: true,
+        }]);
+
+        try {
+            const response = await sendChatMessage(apiMessages, model, currentPhase, threadId);
+            const content = response.message.content;
+
+            // 로딩 메시지를 실제 응답으로 교체
+            setMessages(prev => {
+                const withoutLoading = prev.filter(m => m.id !== `loading-${model}`);
+                return [...withoutLoading, {
+                    id: `ai-${model}-${Date.now()}`,
+                    type: "ai" as const,
+                    content,
+                    model,
+                }];
+            });
+
+            // 발언 횟수 업데이트
+            setTurnCount(prev => ({ ...prev, [model]: prev[model] + 1 }));
+
+            // Phase 1이면 발언한 AI 목록에 추가
+            if (currentPhase === "opinion") {
+                setSpokenInPhase1(prev => [...prev, model]);
+            }
+
+            return content;
+        } catch (error) {
+            setMessages(prev => {
+                const withoutLoading = prev.filter(m => m.id !== `loading-${model}`);
+                return [...withoutLoading, {
+                    id: `ai-${model}-${Date.now()}`,
+                    type: "ai" as const,
+                    content: "",
+                    model,
+                    error: (error as Error).message,
+                }];
+            });
+            return null;
+        }
+    };
+
+    // 메시지 전송 (사용자 입력 처리)
     const handleSubmit = async (e: FormEvent) => {
         e.preventDefault();
         if (!input.trim() || isLoading) return;
@@ -140,7 +234,7 @@ export default function Chat() {
             type: "user",
             content: userMessage,
         };
-        setMessages((prev) => [...prev, userChatMessage]);
+        setMessages(prev => [...prev, userChatMessage]);
 
         // 대화 히스토리 구성 (API용)
         const apiMessages: Message[] = [];
@@ -153,60 +247,17 @@ export default function Chat() {
         });
         apiMessages.push({ role: "user", content: userMessage });
 
-        // 순차적으로 모델 호출 (thread_id 전달)
-        const allMessages = await sendToModelsSequentially(
-            apiMessages,
-            (model, result) => {
-                const nextModel = result.nextModel;
-
-                // 현재 모델 응답 추가
-                const aiMessage: ChatMessage = {
-                    id: `ai-${model}-${Date.now()}`,
-                    type: "ai",
-                    content: result.content,
-                    model,
-                    error: result.error,
-                };
-
-                setMessages((prev) => {
-                    // 로딩 메시지 제거하고 실제 응답 추가
-                    const withoutLoading = prev.filter((m) => m.id !== `loading-${model}`);
-                    const newMessages = [...withoutLoading, aiMessage];
-
-                    // 다음 모델 로딩 메시지 추가
-                    if (nextModel) {
-                        newMessages.push({
-                            id: `loading-${nextModel}`,
-                            type: "ai",
-                            content: "",
-                            model: nextModel,
-                            isLoading: true,
-                        });
-                    }
-
-                    return newMessages;
-                });
-            },
-            // 첫 번째 AI 로딩 표시
-            (firstModel) => {
-                setMessages((prev) => [
-                    ...prev,
-                    {
-                        id: `loading-${firstModel}`,
-                        type: "ai",
-                        content: "",
-                        model: firstModel,
-                        isLoading: true,
-                    },
-                ]);
-            },
-            threadId
-        );
+        // 첫 발언자 결정 및 호출
+        const firstSpeaker = decideNextSpeaker(null, turnCount, phase, spokenInPhase1);
+        const response = await callAI(firstSpeaker, apiMessages, threadId, phase);
 
         // 첫 턴이면 제목 생성
         if (isFirstTurn && threadId) {
             try {
-                const updatedThread = await generateThreadTitle(threadId, allMessages);
+                const updatedThread = await generateThreadTitle(threadId, [
+                    ...apiMessages,
+                    { role: "assistant", content: response || "", model: firstSpeaker }
+                ]);
                 setCurrentThreadTitle(updatedThread.title);
                 setThreads(prev => prev.map(t =>
                     t.id === threadId ? { ...t, title: updatedThread.title } : t
@@ -218,7 +269,55 @@ export default function Chat() {
         }
 
         setIsLoading(false);
-        loadThreads(); // 쓰레드 목록 새로고침
+        setWaitingForAction(true); // 사용자 액션 대기 상태로 전환
+        loadThreads();
+    };
+
+    // 사용자 액션 처리 (계속/개입/종료)
+    const handleAction = async (action: "continue" | "intervene" | "exit") => {
+        if (action === "exit") {
+            // 토론 종료
+            setWaitingForAction(false);
+            return;
+        }
+
+        if (action === "intervene") {
+            // 사용자 개입 - 입력창 활성화하고 대기
+            setWaitingForAction(false);
+            textareaRef.current?.focus();
+            return;
+        }
+
+        // action === "continue"
+        setWaitingForAction(false);
+        setIsLoading(true);
+
+        // 현재 대화 히스토리 구성
+        const apiMessages: Message[] = [];
+        messages.forEach((msg) => {
+            if (msg.type === "user") {
+                apiMessages.push({ role: "user", content: msg.content });
+            } else if (msg.type === "ai" && msg.content && !msg.error) {
+                apiMessages.push({ role: "assistant", content: msg.content, model: msg.model });
+            }
+        });
+
+        // 마지막 AI 응답에서 다음 발언자 결정
+        const lastAiMessage = [...messages].reverse().find(m => m.type === "ai" && m.content);
+        const lastResponse = lastAiMessage?.content || null;
+
+        // Phase 1에서 3명 모두 발언했으면 Phase 2로 전환
+        let currentPhase = phase;
+        if (phase === "opinion" && spokenInPhase1.length >= 3) {
+            currentPhase = "free_talk";
+            setPhase("free_talk");
+        }
+
+        const nextSpeaker = decideNextSpeaker(lastResponse, turnCount, currentPhase, spokenInPhase1);
+        await callAI(nextSpeaker, apiMessages, currentThreadId!, currentPhase);
+
+        setIsLoading(false);
+        setWaitingForAction(true);
     };
 
     // Enter로 전송 (Shift+Enter는 줄바꿈)
@@ -348,6 +447,34 @@ export default function Chat() {
                                 </div>
                             ))
                         )}
+
+                        {/* 액션 버튼 */}
+                        {waitingForAction && (
+                            <div className="action-buttons">
+                                <button
+                                    className="action-button continue"
+                                    onClick={() => handleAction("continue")}
+                                    disabled={isLoading}
+                                >
+                                    ▶ 계속
+                                </button>
+                                <button
+                                    className="action-button intervene"
+                                    onClick={() => handleAction("intervene")}
+                                    disabled={isLoading}
+                                >
+                                    ✋ 개입
+                                </button>
+                                <button
+                                    className="action-button exit"
+                                    onClick={() => handleAction("exit")}
+                                    disabled={isLoading}
+                                >
+                                    ⏹ 종료
+                                </button>
+                            </div>
+                        )}
+
                         <div ref={messagesEndRef} />
                     </div>
 

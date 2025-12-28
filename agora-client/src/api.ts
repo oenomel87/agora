@@ -1,4 +1,4 @@
-import type { ChatResponse, Message, ModelType, Thread, ThreadDetail, ThreadList } from "./types";
+import type { ChatResponse, DiscussionPhase, Message, ModelType, Thread, ThreadDetail, ThreadList } from "./types";
 
 const API_BASE_URL = "http://localhost:8000";
 
@@ -72,13 +72,14 @@ export async function generateThreadTitle(threadId: string, messages: Message[])
 
 // ============ Chat API ============
 
-// 특정 모델에 채팅 요청
+// 특정 모델에 채팅 요청 (단일 턴)
 export async function sendChatMessage(
     messages: Message[],
     model: ModelType,
+    phase: DiscussionPhase = "opinion",
     threadId?: string
 ): Promise<ChatResponse> {
-    const request = { messages, model, thread_id: threadId };
+    const request = { messages, model, phase, thread_id: threadId };
 
     const response = await fetch(`${API_BASE_URL}/chat`, {
         method: "POST",
@@ -131,7 +132,7 @@ export async function sendToModelsSequentially(
 
     while (currentModel) {
         try {
-            const response = await sendChatMessage(messages, currentModel, threadId);
+            const response = await sendChatMessage(messages, currentModel, "opinion", threadId);
             const content = response.message.content;
             const nextModel = response.next_model;
 
