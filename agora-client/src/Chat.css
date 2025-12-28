@@ -219,7 +219,7 @@
 
 /* Chat Header */
 .chat-header {
-  padding: 1rem 1.5rem;
+  padding: 0.6rem 1.5rem;
   text-align: center;
   border-bottom: 1px solid #e2e8f0;
   background: white;
@@ -227,15 +227,9 @@
 
 .chat-header h2 {
   margin: 0;
-  font-size: 1.1rem;
+  font-size: 1rem;
   font-weight: 600;
   color: #1e293b;
-}
-
-.chat-header p {
-  margin: 0.25rem 0 0;
-  color: #64748b;
-  font-size: 0.8rem;
 }
 
 /* Messages Area */

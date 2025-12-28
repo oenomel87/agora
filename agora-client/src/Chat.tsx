@@ -305,7 +305,6 @@ export default function Chat() {
                     {/* Chat Header */}
                     <header className="chat-header">
                         <h2>{currentThreadTitle}</h2>
-                        <p>Anthropic, GPT, Gemini가 함께 대화합니다</p>
                     </header>
 
                     {/* Messages */}
